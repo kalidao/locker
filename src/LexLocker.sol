@@ -24,10 +24,10 @@ struct Locker {
     address oracle;
     address asset;
     Standard std;
-    uint88 tokenId;
-    uint112 deposit;
+    uint80 tokenId;
+    uint96 deposit;
     uint32 deadline;
-    uint32 milestone;
+    uint8 milestone;
     bool frozen;
 }
 
@@ -50,8 +50,8 @@ contract LexLocker is
         address oracle,
         address asset,
         Standard std,
-        uint88 tokenId,
-        uint112[] amounts,
+        uint80 tokenId,
+        uint96[] amounts,
         uint32 deadline,
         bytes32 details
     );
@@ -75,6 +75,8 @@ contract LexLocker is
     /// -----------------------------------------------------------------------
     /// Custom Errors
     /// -----------------------------------------------------------------------
+
+    error Overflow();
 
     error InvalidETHTribute();
 
@@ -169,8 +171,8 @@ contract LexLocker is
         address oracle,
         address asset,
         Standard std,
-        uint88 tokenId,
-        uint112[] calldata amounts,
+        uint80 tokenId,
+        uint96[] calldata amounts,
         uint32 deadline,
         bytes32 details,
         uint8 v,
@@ -209,10 +211,10 @@ contract LexLocker is
             }
         }
 
-        uint112 sum;
+        uint96 sum;
 
         for (uint256 i; i < amounts.length; ) {
-            sum += amounts[i];
+            if ((sum += amounts[i]) >= (1 << 96)) revert Overflow();
 
             // An array can't have a total length
             // larger than the max uint256 value.
@@ -338,7 +340,7 @@ contract LexLocker is
             );
 
         unchecked {
-            lock.deposit -= uint112(amount);
+            lock.deposit -= uint96(amount);
 
             ++lock.milestone;
         }
