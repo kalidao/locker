@@ -4,3 +4,9 @@
 [submodule "lib/solbase"]
 	path = lib/solbase
 	url = https://github.com/Sol-DAO/solbase
+[submodule "lib/rage-router"]
+	path = lib/rage-router
+	url = https://github.com/kalidao/rage-router
+[submodule "lib/keep"]
+	path = lib/keep
+	url = https://github.com/kalidao/keep
