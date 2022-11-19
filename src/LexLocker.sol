@@ -4,9 +4,10 @@ pragma solidity ^0.8.4;
 import {ERC1155STF} from "@rage/utils/ERC1155STF.sol";
 import {ERC1155TokenReceiver} from "@keep/KeepToken.sol";
 import {SelfPermit} from "@base/src/utils/SelfPermit.sol";
+import {ERC1155B} from "@base/src/tokens/ERC1155/ERC1155B.sol";
 import {ReentrancyGuard} from "@base/src/utils/ReentrancyGuard.sol";
+import {SafeTransferLib} from "@base/src/utils/SafeTransferLib.sol";
 import {SafeMulticallable} from "@base/src/utils/SafeMulticallable.sol";
-import {safeTransferETH, safeTransfer, safeTransferFrom} from "@base/src/utils/SafeTransfer.sol";
 
 /// @title Lex Locker
 /// @notice Law-enabled locker for ETH and any token (ERC20/721/1155).
@@ -20,12 +21,11 @@ enum Standard {
 
 struct Locker {
     address from;
-    address to;
     address oracle;
     address asset;
     Standard std;
-    uint80 tokenId;
-    uint96 deposit;
+    uint88 tokenId;
+    uint208 deposit;
     uint32 deadline;
     uint8 milestone;
     bool frozen;
@@ -35,9 +35,16 @@ struct Locker {
 contract LexLocker is
     ERC1155TokenReceiver,
     SelfPermit,
+    ERC1155B,
     ReentrancyGuard,
     SafeMulticallable
 {
+    /// -----------------------------------------------------------------------
+    /// Library Usage
+    /// -----------------------------------------------------------------------
+
+    using SafeTransferLib for address;
+
     /// -----------------------------------------------------------------------
     /// Events
     /// -----------------------------------------------------------------------
@@ -50,8 +57,8 @@ contract LexLocker is
         address oracle,
         address asset,
         Standard std,
-        uint80 tokenId,
-        uint96[] amounts,
+        uint88 tokenId,
+        uint208[] amounts,
         uint32 deadline,
         bytes32 details
     );
@@ -95,6 +102,8 @@ contract LexLocker is
     /// -----------------------------------------------------------------------
     /// Locker Storage
     /// -----------------------------------------------------------------------
+
+    ERC1155B internal immutable uriFetcher;
 
     Locker[] public lockers;
 
@@ -141,7 +150,10 @@ contract LexLocker is
     /// Constructor
     /// -----------------------------------------------------------------------
 
-    constructor() payable {
+    /// @notice Create contract.
+    /// @param _uriFetcher Metadata extension.
+    constructor(ERC1155B _uriFetcher) payable {
+        uriFetcher = _uriFetcher;
         INITIAL_CHAIN_ID = block.chainid;
         INITIAL_DOMAIN_SEPARATOR = _computeDomainSeparator();
     }
@@ -149,6 +161,15 @@ contract LexLocker is
     /// -----------------------------------------------------------------------
     /// Locker Logic
     /// -----------------------------------------------------------------------
+
+    /// @notice ID metadata fetcher.
+    /// @param id ID to fetch from.
+    /// @return tokenURI Metadata.
+    function uri(
+        uint256 id
+    ) public view virtual override returns (string memory) {
+        return uriFetcher.uri(id);
+    }
 
     /// @notice Locker maker mechanism.
     /// @param from The account to pull.
@@ -165,23 +186,25 @@ contract LexLocker is
     /// @param v Must produce valid secp256k1 signature from the `owner` along with `r` and `s`.
     /// @param r Must produce valid secp256k1 signature from the `owner` along with `v` and `s`.
     /// @param s Must produce valid secp256k1 signature from the `owner` along with `r` and `v`.
+    /// @param countersigned Whether to include on-chain recovery of receiver account signature.
     function deposit(
         address from,
         address to,
         address oracle,
         address asset,
         Standard std,
-        uint80 tokenId,
-        uint96[] calldata amounts,
+        uint88 tokenId,
+        uint208[] calldata amounts,
         uint32 deadline,
         bytes32 details,
         uint8 v,
         bytes32 r,
-        bytes32 s
+        bytes32 s,
+        bool countersigned
     ) public payable virtual nonReentrant returns (uint256 locker) {
         if (msg.sender != from) {
             // Unchecked because the only math done is incrementing
-            // the depositor's nonce which cannot realistically overflow.
+            // the depositor's nonce which can't realistically overflow.
             unchecked {
                 bytes32 hash = keccak256(
                     abi.encodePacked(
@@ -190,7 +213,7 @@ contract LexLocker is
                         keccak256(
                             abi.encode(
                                 keccak256(
-                                    "Deposit(address to,address oracle,address asset,uint8 std,uint88 tokenId,uint112[] calldata amounts,uint32 deadline,bytes32 details,uint256 nonce)"
+                                    "Deposit(address to,address oracle,address asset,uint8 std,uint88 tokenId,uint208[] calldata amounts,uint32 deadline,bytes32 details,bool countersigned,uint256 nonce)"
                                 ),
                                 to,
                                 oracle,
@@ -200,21 +223,25 @@ contract LexLocker is
                                 amounts,
                                 deadline,
                                 details,
+                                countersigned,
                                 nonces[from]++
                             )
                         )
                     )
                 );
 
-                // Check signature recovery.
+                // Check depositor signature.
                 _recoverSig(hash, from, v, r, s);
+
+                // If applicable, check countersignature.
+                if (countersigned) _recoverSig(hash, to, v, r, s);
             }
         }
 
-        uint96 sum;
+        uint208 sum;
 
         for (uint256 i; i < amounts.length; ) {
-            if ((sum += amounts[i]) >= (1 << 96)) revert Overflow();
+            if ((sum += amounts[i]) >= (1 << 208)) revert Overflow();
 
             // An array can't have a total length
             // larger than the max uint256 value.
@@ -230,7 +257,6 @@ contract LexLocker is
         lockers.push(
             Locker({
                 from: from,
-                to: to,
                 oracle: oracle,
                 asset: asset,
                 std: std,
@@ -242,15 +268,17 @@ contract LexLocker is
             })
         );
 
+        _mint(to, locker, "");
+
         // If user attaches ETH, handle value.
-        // Otherwise, token transfer made.
+        // Otherwise, token transfer is made.
         if (msg.value != 0) {
             if (msg.value != sum || std != Standard.ETH)
                 revert InvalidETHTribute();
         } else if (std == Standard.ERC20) {
-            safeTransferFrom(asset, from, address(this), sum);
+            asset.safeTransferFrom(from, address(this), sum);
         } else if (std == Standard.ERC721) {
-            safeTransferFrom(asset, from, address(this), tokenId);
+            asset.safeTransferFrom(from, address(this), tokenId);
         } else if (std != Standard.ETH) {
             ERC1155STF(asset).safeTransferFrom(
                 from,
@@ -296,7 +324,7 @@ contract LexLocker is
         if (msg.sender != lock.from)
             if (msg.sender != lock.oracle) {
                 // Unchecked because the only math done is incrementing
-                // the user's nonce which cannot realistically overflow.
+                // the user's nonce which can't realistically overflow.
                 unchecked {
                     bytes32 hash = keccak256(
                         abi.encodePacked(
@@ -322,30 +350,38 @@ contract LexLocker is
         // Check whether frozen.
         if (lock.frozen) revert Frozen();
 
+        // Fetch locker receiver.
+        address to = ownerOf[locker];
+
         // Fetch milestone amount.
         uint256 amount = schedules[locker][lock.milestone];
 
-        if (lock.std == Standard.ETH) safeTransferETH(lock.to, amount);
+        if (lock.std == Standard.ETH) to.safeTransferETH(amount);
         else if (lock.std == Standard.ERC20)
-            safeTransfer(lock.asset, lock.to, amount);
+            lock.asset.safeTransfer(to, amount);
         else if (lock.std == Standard.ERC721)
-            safeTransferFrom(lock.asset, address(this), lock.to, lock.tokenId);
+            lock.asset.safeTransferFrom(address(this), to, lock.tokenId);
         else
             ERC1155STF(lock.asset).safeTransferFrom(
                 address(this),
-                lock.to,
+                to,
                 lock.tokenId,
                 amount,
                 ""
             );
 
+        // Unchecked because milestone
+        // won't exceed total deposit,
+        // and milestone step won't
+        // realistically overflow.
         unchecked {
-            lock.deposit -= uint96(amount);
+            lock.deposit -= uint208(amount);
 
             ++lock.milestone;
         }
 
         // Delete locker so it can't be replayed.
+        // Unchecked because schedule is positive.
         unchecked {
             if (lock.milestone == schedules[locker].length - 1)
                 delete lockers[locker];
@@ -373,7 +409,7 @@ contract LexLocker is
         if (msg.sender != lock.from)
             if (msg.sender != lock.oracle) {
                 // Unchecked because the only math done is incrementing
-                // the user's nonce which cannot realistically overflow.
+                // the user's nonce which can't realistically overflow.
                 unchecked {
                     bytes32 hash = keccak256(
                         abi.encodePacked(
@@ -402,16 +438,11 @@ contract LexLocker is
         // Check release deadline.
         if (block.timestamp <= lock.deadline) revert DeadlinePending();
 
-        if (lock.std == Standard.ETH) safeTransferETH(lock.from, lock.deposit);
+        if (lock.std == Standard.ETH) lock.from.safeTransferETH(lock.deposit);
         else if (lock.std == Standard.ERC20)
-            safeTransfer(lock.asset, msg.sender, lock.deposit);
+            lock.asset.safeTransfer(msg.sender, lock.deposit);
         else if (lock.std == Standard.ERC721)
-            safeTransferFrom(
-                lock.asset,
-                address(this),
-                lock.from,
-                lock.tokenId
-            );
+            lock.asset.safeTransferFrom(address(this), lock.from, lock.tokenId);
         else
             ERC1155STF(lock.asset).safeTransferFrom(
                 address(this),
@@ -446,10 +477,13 @@ contract LexLocker is
         // Fetch locker details.
         Locker storage lock = lockers[locker];
 
+        // Fetch locker receiver.
+        address to = ownerOf[locker];
+
         if (msg.sender != lock.from)
-            if (msg.sender != lock.to) {
+            if (msg.sender != to) {
                 // Unchecked because the only math done is incrementing
-                // the user's nonce which cannot realistically overflow.
+                // the user's nonce which can't realistically overflow.
                 unchecked {
                     bytes32 hash = keccak256(
                         abi.encodePacked(
@@ -473,7 +507,7 @@ contract LexLocker is
                 }
 
                 if (user != lock.from)
-                    if (user != lock.to) revert InvalidSig();
+                    if (user != to) revert InvalidSig();
             }
 
         // Set freezer.
@@ -550,19 +584,20 @@ contract LexLocker is
 
         depositeeAward -= fee;
 
+        // Fetch locker receiver.
+        address to = ownerOf[locker];
+
         if (lock.std == Standard.ETH)
-            if (depositorAward != 0) safeTransferETH(lock.from, depositorAward);
-        if (depositeeAward != 0) safeTransferETH(lock.to, depositeeAward);
+            if (depositorAward != 0) lock.from.safeTransferETH(depositorAward);
+        if (depositeeAward != 0) to.safeTransferETH(depositeeAward);
         else if (lock.std == Standard.ERC20)
             if (depositorAward != 0)
-                safeTransfer(lock.asset, lock.from, depositorAward);
-        if (depositeeAward != 0)
-            safeTransfer(lock.asset, lock.to, depositeeAward);
+                lock.asset.safeTransfer(lock.from, depositorAward);
+        if (depositeeAward != 0) lock.asset.safeTransfer(to, depositeeAward);
         else if (lock.std == Standard.ERC721)
-            safeTransferFrom(
-                lock.asset,
+            lock.asset.safeTransferFrom(
                 address(this),
-                depositorAward != 0 ? lock.from : lock.to,
+                depositorAward != 0 ? lock.from : to,
                 lock.tokenId
             );
         else if (depositorAward != 0)
@@ -576,7 +611,7 @@ contract LexLocker is
         if (depositeeAward != 0)
             ERC1155STF(lock.asset).safeTransferFrom(
                 address(this),
-                lock.to,
+                to,
                 lock.tokenId,
                 depositeeAward,
                 ""
@@ -591,6 +626,12 @@ contract LexLocker is
         );
     }
 
+    /// @notice Oracle registration mechanism.
+    /// @param user The address for verification.
+    /// @param rate The amount to divide remainder against.
+    /// @param v Must produce valid secp256k1 signature from the `owner` along with `r` and `s`.
+    /// @param r Must produce valid secp256k1 signature from the `owner` along with `v` and `s`.
+    /// @param s Must produce valid secp256k1 signature from the `owner` along with `r` and `v`.
     function register(
         address user,
         uint256 rate,
@@ -600,7 +641,7 @@ contract LexLocker is
     ) public payable virtual {
         if (msg.sender != user) {
             // Unchecked because the only math done is incrementing
-            // the user's nonce which cannot realistically overflow.
+            // the user's nonce which can't realistically overflow.
             unchecked {
                 bytes32 hash = keccak256(
                     abi.encodePacked(

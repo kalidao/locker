@@ -3,7 +3,7 @@ pragma solidity ^0.8.15;
 
 import {Script} from "forge-std/Script.sol";
 
-import {LexLocker} from "src/LexLocker.sol";
+import {ERC1155B, LexLocker} from "src/LexLocker.sol";
 
 /// @notice A very simple deployment script.
 contract Deploy is Script {
@@ -12,7 +12,7 @@ contract Deploy is Script {
   /// @return locker The deployed contract.
   function run() external returns (LexLocker locker) {
     vm.startBroadcast();
-    locker = new LexLocker();
+    locker = new LexLocker(ERC1155B(address(0xdead)));
     vm.stopBroadcast();
   }
 }
